@@ -16,9 +16,11 @@ package util
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"sync/atomic"
 	"time"
 
 	"dingospeed/pkg/common"
@@ -46,114 +48,326 @@ func RetryRequest(f func() (*common.Response, error)) (*common.Response, error) 
 	return resp, err
 }
 
-// Head 方法用于发送带请求头的 HEAD 请求
-func Head(url string, headers map[string]string, timeout time.Duration) (*common.Response, error) {
-	req, err := http.NewRequest("HEAD", url, nil)
+// Head 方法用于发送带请求头的 HEAD 请求，支持主备URL重试
+func Head(requestURL string, headers map[string]string, timeout time.Duration) (*common.Response, error) {
+	parsedURL, err := url.Parse(requestURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("解析请求URL失败: %w", err)
 	}
-	for key, value := range headers {
-		req.Header.Set(key, value)
+
+	type urlInfo struct {
+		base   string
+		isMain bool
 	}
-	client := &http.Client{}
-	client.Timeout = timeout
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
+	urls := []urlInfo{
+		{config.SysConfig.GetHFURLBase(), true},
 	}
-	respHeaders := make(map[string]interface{})
-	for key, value := range resp.Header {
-		respHeaders[key] = value
+	if config.SysConfig.DynamicProxy.Enabled {
+		urls = append(urls, urlInfo{config.SysConfig.GetBpHFURLBase(), false})
 	}
-	return &common.Response{
-		StatusCode: resp.StatusCode,
-		Headers:    respHeaders,
-	}, nil
+
+	var lastResp *common.Response
+	var lastErr error
+
+	for _, u := range urls {
+		targetURL := u.base + parsedURL.Path
+		req, err := http.NewRequest("HEAD", targetURL, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+		client := &http.Client{Timeout: timeout}
+		resp, err := client.Do(req)
+		if err != nil {
+			zap.S().Warnf("%sURL请求失败: %s, 错误: %v", map[bool]string{true: "主", false: "备用"}[u.isMain], targetURL, err)
+			lastErr = err
+			continue
+		}
+		defer resp.Body.Close()
+
+		respHeaders := make(map[string]interface{})
+		for key, values := range resp.Header {
+			respHeaders[key] = values
+		}
+		result := &common.Response{
+			StatusCode: resp.StatusCode,
+			Headers:    respHeaders,
+		}
+		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusTemporaryRedirect {
+			return result, nil
+		}
+		zap.S().Warnf("%sURL返回无效状态码: %s, 状态码: %d", map[bool]string{true: "主", false: "备用"}[u.isMain], targetURL, resp.StatusCode)
+		lastResp = result
+	}
+	if lastErr != nil {
+		return nil, fmt.Errorf("主URL和备用URL均请求失败: %w", lastErr)
+	}
+	return lastResp, nil
 }
 
-// Get 方法用于发送带请求头的 GET 请求
-func Get(url string, headers map[string]string, timeout time.Duration) (*common.Response, error) {
-	req, err := http.NewRequest("GET", url, nil)
+// Get 方法用于发送带请求头的 GET 请求，支持主备URL重试
+func Get(requestURL string, headers map[string]string, timeout time.Duration) (*common.Response, error) {
+	parsedURL, err := url.Parse(requestURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("解析请求URL失败: %w", err)
 	}
-	for key, value := range headers {
-		req.Header.Set(key, value)
+
+	type urlInfo struct {
+		base   string
+		isMain bool
 	}
-	client := &http.Client{}
-	client.Timeout = timeout
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
+	urls := []urlInfo{
+		{config.SysConfig.GetHFURLBase(), true},
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
+	if config.SysConfig.DynamicProxy.Enabled {
+		urls = append(urls, urlInfo{config.SysConfig.GetBpHFURLBase(), false})
 	}
-	respHeaders := make(map[string]interface{})
-	for key, value := range resp.Header {
-		respHeaders[key] = value
+
+	var lastResp *common.Response
+	var lastErr error
+
+	for _, u := range urls {
+		targetURL := u.base + parsedURL.Path
+		req, err := http.NewRequest("GET", targetURL, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+		client := &http.Client{Timeout: timeout}
+		resp, err := client.Do(req)
+		if err != nil {
+			zap.S().Warnf("%sURL请求失败: %s, 错误: %v", map[bool]string{true: "主", false: "备用"}[u.isMain], targetURL, err)
+			lastErr = err
+			continue
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		respHeaders := make(map[string]interface{})
+		for key, values := range resp.Header {
+			respHeaders[key] = values
+		}
+		result := &common.Response{
+			StatusCode: resp.StatusCode,
+			Headers:    respHeaders,
+			Body:       body,
+		}
+		if resp.StatusCode == http.StatusOK {
+			return result, nil
+		}
+		zap.S().Warnf("%sURL返回非OK状态码: %s, 状态码: %d", map[bool]string{true: "主", false: "备用"}[u.isMain], targetURL, resp.StatusCode)
+		lastResp = result
 	}
-	return &common.Response{
-		StatusCode: resp.StatusCode,
-		Headers:    respHeaders,
-		Body:       body,
-	}, nil
+	if lastErr != nil {
+		return nil, fmt.Errorf("主URL和备用URL均请求失败: %w", lastErr)
+	}
+	return lastResp, nil
 }
 
-func GetStream(url string, headers map[string]string, timeout time.Duration, f func(r *http.Response)) error {
-	client := &http.Client{}
-	client.Timeout = timeout
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return err
-	}
-	for key, value := range headers {
-		req.Header.Set(key, value)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	respHeaders := make(map[string]interface{})
-	for key, value := range resp.Header {
-		respHeaders[key] = value
-	}
-	f(resp)
-	return nil
+// speedMonitoringReader 是一个包装器，用于监控读取的字节数
+type speedMonitoringReader struct {
+	io.ReadCloser
+	onRead func(bytesRead int)
 }
 
-// Post 方法用于发送带请求头的 POST 请求
-func Post(url string, contentType string, data []byte, headers map[string]string) (*common.Response, error) {
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(data))
+// Read 实现了io.Reader接口
+func (r *speedMonitoringReader) Read(p []byte) (n int, err error) {
+	n, err = r.ReadCloser.Read(p)
+	if n > 0 && r.onRead != nil {
+		r.onRead(n)
+	}
+	return
+}
+
+// GetStream 方法用于发送带请求头的 GET 请求，支持主备URL重试
+func GetStream(requestURL string, headers map[string]string, timeout time.Duration, f func(r *http.Response)) error {
+	speedThreshold := config.SysConfig.GetSpeedThreshold()
+	speedCheckInterval := config.SysConfig.GetSpeedCheckInterval()
+	minSlowChecks := config.SysConfig.GetMinSlowChecks()
+
+	parsedURL, err := url.Parse(requestURL)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("解析请求URL失败: %w", err)
 	}
-	req.Header.Set("Content-Type", contentType)
-	for key, value := range headers {
-		req.Header.Set(key, value)
+
+	type urlInfo struct {
+		base   string
+		isMain bool
 	}
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	urls := []urlInfo{
+		{config.SysConfig.GetHFURLBase(), true},
+	}
+	bpBase := config.SysConfig.GetBpHFURLBase()
+	if config.SysConfig.DynamicProxy.Enabled && bpBase != "" && bpBase != "false" {
+		urls = append(urls, urlInfo{bpBase, false})
+	}
+
+	for _, u := range urls {
+		targetURL := u.base + parsedURL.Path
+		client := &http.Client{Timeout: timeout}
+		req, err := http.NewRequest("GET", targetURL, nil)
+		if err != nil {
+			zap.S().Warnf("%sURL请求构建失败: %s, 错误: %v", map[bool]string{true: "主", false: "备用"}[u.isMain], targetURL, err)
+			continue
+		}
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			zap.S().Warnf("%sURL请求失败: %s, 错误: %v", map[bool]string{true: "主", false: "备用"}[u.isMain], targetURL, err)
+			continue
+		}
+
+		var (
+			totalBytes   int64
+			startTime    = time.Now()
+			lastBytes    int64
+			lastTime     = startTime
+			slowCount    int32
+			needSwitch   = make(chan struct{})
+			readComplete = make(chan struct{})
+		)
+
+		bodyReader := resp.Body
+		if u.isMain && config.SysConfig.DynamicProxy.Enabled {
+			bodyReader = &speedMonitoringReader{
+				ReadCloser: resp.Body,
+				onRead: func(bytesRead int) {
+					totalBytes += int64(bytesRead)
+					now := time.Now()
+					elapsed := now.Sub(lastTime).Seconds()
+					if totalBytes-lastBytes > speedThreshold*2 {
+						currentSpeed := float64(totalBytes-lastBytes) / elapsed
+						if currentSpeed < float64(speedThreshold) {
+							if atomic.AddInt32(&slowCount, 1) >= int32(minSlowChecks) {
+								select {
+								case <-needSwitch:
+								default:
+									close(needSwitch)
+								}
+							}
+						} else {
+							atomic.StoreInt32(&slowCount, 0)
+						}
+						lastBytes = totalBytes
+						lastTime = now
+					}
+				},
+			}
+			go func() {
+				time.Sleep(speedCheckInterval)
+				if time.Since(startTime).Seconds() > float64(speedCheckInterval) && totalBytes < speedThreshold*int64(speedCheckInterval) {
+					select {
+					case <-needSwitch:
+					default:
+						close(needSwitch)
+					}
+				}
+			}()
+		}
+		resp.Body = bodyReader
+		defer resp.Body.Close()
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			zap.S().Warnf("%sURL返回无效状态码: %s, 状态码: %d", map[bool]string{true: "主", false: "备用"}[u.isMain], targetURL, resp.StatusCode)
+			continue
+		}
+
+		f(resp)
+		close(readComplete)
+
+		select {
+		case <-needSwitch:
+			totalTime := time.Since(startTime).Seconds()
+			avgSpeed := float64(totalBytes) / totalTime
+			zap.S().Warnf("%sURL下载速度持续低于阈值，准备切换: %.2f MB/s < %.2f MB/s", map[bool]string{true: "主", false: "备用"}[u.isMain], avgSpeed/1024/1024, float64(speedThreshold)/1024/1024)
+			continue
+		case <-readComplete:
+			if atomic.LoadInt32(&slowCount) >= int32(minSlowChecks) {
+				continue
+			}
+			return nil
+		case <-time.After(timeout):
+			return fmt.Errorf("%sURL请求超时: %s", map[bool]string{true: "主", false: "备用"}[u.isMain], targetURL)
+		}
+	}
+	return fmt.Errorf("主URL和备用URL均请求失败或速度过慢")
+}
+
+// Post 方法用于发送带请求头的 POST 请求，支持主备URL重试
+func Post(requestURL string, contentType string, data []byte, headers map[string]string) (*common.Response, error) {
+	parsedURL, err := url.Parse(requestURL)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("解析请求URL失败: %w", err)
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
+
+	type urlInfo struct {
+		base   string
+		isMain bool
 	}
-	respHeaders := make(map[string]interface{})
-	for key, value := range resp.Header {
-		respHeaders[key] = value
+	urls := []urlInfo{
+		{config.SysConfig.GetHFURLBase(), true},
 	}
-	return &common.Response{
-		StatusCode: resp.StatusCode,
-		Headers:    respHeaders,
-		Body:       body,
-	}, nil
+	if config.SysConfig.DynamicProxy.Enabled {
+		urls = append(urls, urlInfo{config.SysConfig.GetBpHFURLBase(), false})
+	}
+
+	var lastResp *common.Response
+	var lastErr error
+
+	for _, u := range urls {
+		targetURL := u.base + parsedURL.Path
+		req, err := http.NewRequest("POST", targetURL, bytes.NewBuffer(data))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("Content-Type", contentType)
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+		client := &http.Client{}
+		resp, err := client.Do(req)
+		if err != nil {
+			zap.S().Warnf("%sURL请求失败: %s, 错误: %v", map[bool]string{true: "主", false: "备用"}[u.isMain], targetURL, err)
+			lastErr = err
+			continue
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		respHeaders := make(map[string]interface{})
+		for key, values := range resp.Header {
+			respHeaders[key] = values
+		}
+		result := &common.Response{
+			StatusCode: resp.StatusCode,
+			Headers:    respHeaders,
+			Body:       body,
+		}
+		if resp.StatusCode == http.StatusOK {
+			return result, nil
+		}
+		zap.S().Warnf("%sURL返回非OK状态码: %s, 状态码: %d", map[bool]string{true: "主", false: "备用"}[u.isMain], targetURL, resp.StatusCode)
+		lastResp = result
+	}
+	if lastErr != nil {
+		return nil, fmt.Errorf("主URL和备用URL均请求失败: %w", lastErr)
+	}
+	return lastResp, nil
 }
 
 func ResponseStream(c echo.Context, fileName string, headers map[string]string, content <-chan []byte) error {

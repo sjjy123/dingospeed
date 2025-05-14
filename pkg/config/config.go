@@ -39,6 +39,7 @@ type Config struct {
 	Retry            Retry            `json:"retry" yaml:"retry"`
 	TokenBucketLimit TokenBucketLimit `json:"tokenBucketLimit" yaml:"tokenBucketLimit"`
 	DiskClean        DiskClean        `json:"diskClean" yaml:"diskClean"`
+	DynamicProxy     DynamicProxy     `json:"dynamicProxy" yaml:"dynamicProxy"`
 }
 
 type ServerConfig struct {
@@ -51,6 +52,7 @@ type ServerConfig struct {
 	Online      bool   `json:"online" yaml:"online"`
 	Repos       string `json:"repos" yaml:"repos"`
 	HfNetLoc    string `json:"hfNetLoc" yaml:"hfNetLoc"`
+	BpHfNetLoc  string `json:"bpHfNetLoc" yaml:"bpHfNetLoc"`
 	HfScheme    string `json:"hfScheme" yaml:"hfScheme" validate:"oneof=https http"`
 	HfLfsNetLoc string `json:"hfLfsNetLoc" yaml:"hfLfsNetLoc"`
 }
@@ -100,8 +102,19 @@ type DiskClean struct {
 	CollectTimePeriod  int    `json:"collectTimePeriod" yaml:"collectTimePeriod" validate:"min=1,max=600"` // 周期采集内存使用量，单位秒
 }
 
+type DynamicProxy struct {
+	Enabled            bool  `json:"enabled" yaml:"enabled"`
+	SpeedThreshold     int64 `json:"speedThreshold" yaml:"speedThreshold"`
+	SpeedCheckInterval int   `json:"speedCheckInterval" yaml:"speedCheckInterval"`
+	MinSlowChecks      int   `json:"minSlowChecks" yaml:"minSlowChecks"`
+}
+
 func (c *Config) GetHFURLBase() string {
 	return fmt.Sprintf("%s://%s", c.GetHfScheme(), c.GetHfNetLoc())
+}
+
+func (c *Config) GetBpHFURLBase() string {
+	return fmt.Sprintf("%s://%s", c.GetHfScheme(), c.GetBpHfNetLoc())
 }
 
 func (c *Config) Online() bool {
@@ -118,6 +131,10 @@ func (c *Config) GetHost() string {
 
 func (c *Config) GetHfNetLoc() string {
 	return c.Server.HfNetLoc
+}
+
+func (c *Config) GetBpHfNetLoc() string {
+	return c.Server.BpHfNetLoc
 }
 
 func (c *Config) GetCapacity() int {
@@ -170,6 +187,18 @@ func (c *Config) EnableMetric() bool {
 
 func (c *Config) CacheCleanStrategy() string {
 	return c.DiskClean.CacheCleanStrategy
+}
+
+func (c *Config) GetSpeedThreshold() int64 {
+	return c.DynamicProxy.SpeedThreshold
+}
+
+func (c *Config) GetSpeedCheckInterval() time.Duration {
+	return time.Duration(c.DynamicProxy.SpeedCheckInterval) * time.Second
+}
+
+func (c *Config) GetMinSlowChecks() int {
+	return c.DynamicProxy.MinSlowChecks
 }
 
 func (c *Config) SetDefaults() {

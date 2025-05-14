@@ -344,36 +344,69 @@ func (f *FileDao) WhoamiV2Generator(c echo.Context) error {
 		newHeaders[lowerKey] = vv
 	}
 
-	targetURL, err := url.Parse(config.SysConfig.GetHFURLBase())
-	if err != nil {
-		zap.L().Error("Failed to parse base URL", zap.Error(err))
-		return echo.NewHTTPError(http.StatusInternalServerError, "Internal Server Error")
-	}
-	targetURL.Path = path.Join(targetURL.Path, "/api/whoami-v2")
+	// 尝试使用主配置进行请求
+	baseURL := config.SysConfig.GetHFURLBase()
+	var resp *http.Response
+	var err error
+	var usedBackup bool
 
-	// targetURL := "https://huggingface.co/api/whoami-v2"
-	zap.S().Debugf("exec WhoamiV2Generator:targetURL:%s,host:%s", targetURL.String(), config.SysConfig.GetHfNetLoc())
-	// Creating a proxy request
-	req, err := http.NewRequest("GET", targetURL.String(), nil)
-	if err != nil {
-		zap.L().Error("Failed to create request", zap.Error(err))
-		return echo.NewHTTPError(http.StatusInternalServerError, "Internal Server Error")
-	}
-	req.Header = newHeaders
-	// req.Host = "huggingface.co"
-	req.Host = config.SysConfig.GetHfNetLoc()
+	// 尝试请求函数
+	tryRequest := func(baseUrl string) (*http.Response, error) {
+		targetURL, parseErr := url.Parse(baseUrl)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		targetURL.Path = path.Join(targetURL.Path, "/api/whoami-v2")
 
-	client := &http.Client{
-		Timeout: 10 * time.Second,
+		zap.S().Debugf("Attempting request to: %s, host: %s", targetURL.String(), config.SysConfig.GetHfNetLoc())
+
+		req, reqErr := http.NewRequest("GET", targetURL.String(), nil)
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		req.Header = newHeaders
+		req.Host = config.SysConfig.GetHfNetLoc()
+
+		client := &http.Client{
+			Timeout: 10 * time.Second,
+		}
+		return client.Do(req)
 	}
-	resp, err := client.Do(req)
+
+	// 首次尝试使用主配置
+	resp, err = tryRequest(baseURL)
+
+	// 如果主配置请求失败，尝试使用备用配置
+	if err != nil || (resp != nil && resp.StatusCode >= 400) {
+		if resp != nil {
+			resp.Body.Close() // 关闭主配置请求的响应体
+		}
+
+		backupURL := config.SysConfig.GetBpHFURLBase()
+		if backupURL == "" {
+			zap.L().Error("Primary request failed and backup URL is also empty")
+			return echo.NewHTTPError(http.StatusInternalServerError, "Internal Server Error")
+		}
+
+		zap.S().Warn("Primary request failed, attempting with backup configuration")
+		resp, err = tryRequest(backupURL)
+		usedBackup = true
+	}
+
 	if err != nil {
-		zap.L().Error("Failed to forward request", zap.Error(err))
+		zap.L().Error("Both primary and backup requests failed", zap.Error(err))
 		return echo.NewHTTPError(http.StatusBadGateway, "Bad Gateway")
 	}
+
 	defer resp.Body.Close()
 
-	// Processing Response Headers
+	// 记录使用的配置和请求结果
+	if usedBackup {
+		zap.S().Info("Successfully used backup configuration after primary failure")
+	} else {
+		zap.S().Info("Successfully used primary configuration")
+	}
+
 	responseHeaders := make(http.Header)
 	for k, vv := range resp.Header {
 		lowerKey := strings.ToLower(k)
@@ -385,7 +418,6 @@ func (f *FileDao) WhoamiV2Generator(c echo.Context) error {
 		}
 	}
 
-	// Setting the response header
 	for k, vv := range responseHeaders {
 		for _, v := range vv {
 			c.Response().Header().Add(k, v)
@@ -394,7 +426,6 @@ func (f *FileDao) WhoamiV2Generator(c echo.Context) error {
 
 	c.Response().WriteHeader(resp.StatusCode)
 
-	// Streaming response content
 	_, err = io.Copy(c.Response().Writer, resp.Body)
 	if err != nil {
 		zap.L().Error("Failed to stream response", zap.Error(err))
