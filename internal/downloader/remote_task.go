@@ -55,7 +55,7 @@ func (r RemoteFileTask) DoTask() {
 	rangeStartPos, rangeEndPos := r.RangeStartPos, r.RangeEndPos
 	zap.S().Infof("remote file download:%s, taskNo:%d, size:%d, startPos:%d, endPos:%d", r.FileName, r.TaskNo, r.TaskSize, rangeStartPos, rangeEndPos)
 	wg.Add(2)
-	go r.getFileRangeFromRemote(&wg, rangeStartPos, rangeEndPos, contentChan)
+	go r.getFileRangeFromRemote(&wg, rangeStartPos, rangeEndPos, contentChan, r.FileName)
 	curPos := rangeStartPos
 	streamCache := bytes.Buffer{}
 	lastBlock, lastBlockStartPos, lastBlockEndPos := getBlockInfo(curPos, r.DingFile.getBlockSize(), r.DingFile.GetFileSize()) // 块编号，开始位置，结束位置
@@ -179,7 +179,7 @@ func (r RemoteFileTask) GetResponseChan() chan []byte {
 	return r.ResponseChan
 }
 
-func (r RemoteFileTask) getFileRangeFromRemote(wg *sync.WaitGroup, startPos, endPos int64, contentChan chan<- []byte) {
+func (r RemoteFileTask) getFileRangeFromRemote(wg *sync.WaitGroup, startPos, endPos int64, contentChan chan<- []byte, fileName string) {
 	headers := make(map[string]string)
 	if r.authorization != "" {
 		headers["authorization"] = r.authorization
@@ -193,7 +193,7 @@ func (r RemoteFileTask) getFileRangeFromRemote(wg *sync.WaitGroup, startPos, end
 	var contentEncoding, contentLengthStr = "", ""
 	defer close(contentChan)
 
-	if err := util.GetStream(r.hfUrl, headers, config.SysConfig.GetReqTimeOut(), func(resp *http.Response) {
+	if err := util.GetStream(r.hfUrl, headers, config.SysConfig.GetReqTimeOut(), startPos, endPos, fileName, func(resp *http.Response) {
 		contentEncoding = resp.Header.Get("content-encoding")
 		contentLengthStr = resp.Header.Get("content-length")
 		for {

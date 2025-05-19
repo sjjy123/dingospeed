@@ -54,3 +54,6 @@ dynamicProxy:
     speedThreshold: 209715520 #速度阈值，20 * 1024 * 1024,10Mb/s，转换为字节/秒
     speedCheckInterval: 10 #用于统计速度的时间间隔，每2秒统计一次速度
     minSlowChecks: 5 #连续多少次速度低于阈值才切换配置
+    maxSwitchCount: 6 #最大切换次数
+    bytesDeltaThreshold: 5242880 #切换配置的下载字节量阈值 5Mb
+    httpProxy: http://10.201.44.68:1080

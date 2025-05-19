@@ -103,10 +103,13 @@ type DiskClean struct {
 }
 
 type DynamicProxy struct {
-	Enabled            bool  `json:"enabled" yaml:"enabled"`
-	SpeedThreshold     int64 `json:"speedThreshold" yaml:"speedThreshold"`
-	SpeedCheckInterval int   `json:"speedCheckInterval" yaml:"speedCheckInterval"`
-	MinSlowChecks      int   `json:"minSlowChecks" yaml:"minSlowChecks"`
+	Enabled             bool   `json:"enabled" yaml:"enabled"`
+	SpeedThreshold      int64  `json:"speedThreshold" yaml:"speedThreshold"`
+	SpeedCheckInterval  int    `json:"speedCheckInterval" yaml:"speedCheckInterval"`
+	MinSlowChecks       int    `json:"minSlowChecks" yaml:"minSlowChecks"`
+	MaxSwitchCount      int    `json:"maxSwitchCount" yaml:"maxSwitchCount"`
+	HttpProxy           string `json:"httpProxy" yaml:"httpProxy"`
+	BytesDeltaThreshold int64  `json:"bytesDeltaThreshold" yaml:"bytesDeltaThreshold"`
 }
 
 func (c *Config) GetHFURLBase() string {
@@ -193,12 +196,20 @@ func (c *Config) GetSpeedThreshold() int64 {
 	return c.DynamicProxy.SpeedThreshold
 }
 
-func (c *Config) GetSpeedCheckInterval() time.Duration {
-	return time.Duration(c.DynamicProxy.SpeedCheckInterval) * time.Second
-}
-
 func (c *Config) GetMinSlowChecks() int {
 	return c.DynamicProxy.MinSlowChecks
+}
+
+func (c *Config) GetMaxSwitchCount() int {
+	return c.DynamicProxy.MaxSwitchCount
+}
+
+func (c *Config) GetBytesDeltaThreshold() int64 {
+	return c.DynamicProxy.BytesDeltaThreshold
+}
+
+func (c *Config) GetHttpProxy() string {
+	return c.DynamicProxy.HttpProxy
 }
 
 func (c *Config) SetDefaults() {
