@@ -22,7 +22,7 @@ DingoSpeed has the following main product features:
 
 
 # System Architecture
-![System Architecture](png/img.png)
+![System Architecture](png/architecture_en.png)
 
 # Installation
 The project uses the wire command to generate the required dependency code. Install the wire command as follows：
@@ -97,7 +97,7 @@ You can view the path ./repos, where the caches of all datasets and models are s
 # Downloading Models
 The file is divided into different segments of a certain size. The scheduling tool submits the tasks to the coroutine pool for execution. Each coroutine task submits the assigned length to the remote server for a request, reads the response results in chunks, and caches the results in the coroutine's exclusive work queue. The push coroutine then pushes the data to the client. At the same time, it checks whether the current chunk meets the size of a block. If it does, the block is written to the file.
 
-![Downloading Models](png/img_download.png)
+![Downloading Models](png/downloading_models_en.png)
 
 # Storing Models
 
@@ -105,4 +105,4 @@ The repository cache data file consists of a HEADER and data blocks. The functio
 1. Improve the readability of the cache file. Even if the configuration file is modified or the program is upgraded, it will not affect the reading of the cached file.
 2. Efficiently check the existence of blocks without reading the actual database, improving operation efficiency.
 
-![Storing Models](png/img_store.png)
+![Storing Models](png/storing_models_en.png)
