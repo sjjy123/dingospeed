@@ -86,15 +86,21 @@ func Head(requestURL string, headers map[string]string, timeout time.Duration) (
 		for key, value := range headers {
 			req.Header.Set(key, value)
 		}
-		client := &http.Client{Timeout: timeout}
-		// 如果是备用URL，则设置代理
-		if !u.isMain {
-			proxyURL, _ := url.Parse(config.SysConfig.GetHttpProxy())
-			client = &http.Client{
-				Timeout: timeout,
-				Transport: &http.Transport{
-					Proxy: http.ProxyURL(proxyURL),
-				},
+		var client *http.Client
+		// 主URL和备用URL都需要配置代理，但需判断代理是否可用
+		proxyAddr := config.SysConfig.GetHttpProxy()
+		if proxyAddr != "" {
+			proxyURL, err := url.Parse(proxyAddr)
+			if err == nil {
+				client = &http.Client{
+					Timeout: timeout,
+					Transport: &http.Transport{
+						Proxy: http.ProxyURL(proxyURL),
+					},
+				}
+			} else {
+				zap.S().Warnf("代理地址无效，未设置代理: %s, 错误: %v", proxyAddr, err)
+				client = &http.Client{Timeout: timeout}
 			}
 		}
 		resp, err := client.Do(req)
@@ -152,15 +158,21 @@ func Get(requestURL string, headers map[string]string, timeout time.Duration) (*
 			req.Header.Set(key, value)
 		}
 
-		client := &http.Client{Timeout: timeout}
-		// 如果是备用URL，则设置代理
-		if !u.isMain {
-			proxyURL, _ := url.Parse(config.SysConfig.GetHttpProxy())
-			client = &http.Client{
-				Timeout: timeout,
-				Transport: &http.Transport{
-					Proxy: http.ProxyURL(proxyURL),
-				},
+		var client *http.Client
+		// 主URL和备用URL都需要配置代理，但需判断代理是否可用
+		proxyAddr := config.SysConfig.GetHttpProxy()
+		if proxyAddr != "" {
+			proxyURL, err := url.Parse(proxyAddr)
+			if err == nil {
+				client = &http.Client{
+					Timeout: timeout,
+					Transport: &http.Transport{
+						Proxy: http.ProxyURL(proxyURL),
+					},
+				}
+			} else {
+				zap.S().Warnf("代理地址无效，未设置代理: %s, 错误: %v", proxyAddr, err)
+				client = &http.Client{Timeout: timeout}
 			}
 		}
 		resp, err := client.Do(req)
@@ -247,15 +259,21 @@ func GetStream(requestURL string, headers map[string]string, timeout time.Durati
 	for {
 		u := urls[urlIndex]
 		targetURL := u.base + parsedURL.Path
-		client := &http.Client{Timeout: timeout}
-		// 如果是备用URL，则设置代理
-		if !u.isMain {
-			proxyURL, _ := url.Parse(config.SysConfig.GetHttpProxy())
-			client = &http.Client{
-				Timeout: timeout,
-				Transport: &http.Transport{
-					Proxy: http.ProxyURL(proxyURL),
-				},
+		var client *http.Client
+		// 主URL和备用URL都需要配置代理，但需判断代理是否可用
+		proxyAddr := config.SysConfig.GetHttpProxy()
+		if proxyAddr != "" {
+			proxyURL, err := url.Parse(proxyAddr)
+			if err == nil {
+				client = &http.Client{
+					Timeout: timeout,
+					Transport: &http.Transport{
+						Proxy: http.ProxyURL(proxyURL),
+					},
+				}
+			} else {
+				zap.S().Warnf("代理地址无效，未设置代理: %s, 错误: %v", proxyAddr, err)
+				client = &http.Client{Timeout: timeout}
 			}
 		}
 
@@ -277,7 +295,6 @@ func GetStream(requestURL string, headers map[string]string, timeout time.Durati
 
 		// 每次请求前创建新的切换通道
 		needSwitch := make(chan struct{})
-
 		resp, err := client.Do(req)
 		if err != nil {
 			zap.S().Warnf("%sURL请求失败: %s, 错误: %v", map[bool]string{true: "主", false: "备用"}[u.isMain], targetURL, err)
@@ -390,14 +407,20 @@ func Post(requestURL string, contentType string, data []byte, headers map[string
 			req.Header.Set(key, value)
 		}
 
-		client := &http.Client{}
-		// 如果是备用URL，则设置代理
-		if !u.isMain {
-			proxyURL, _ := url.Parse(config.SysConfig.GetHttpProxy())
-			client = &http.Client{
-				Transport: &http.Transport{
-					Proxy: http.ProxyURL(proxyURL),
-				},
+		var client *http.Client
+		// 主URL和备用URL都需要配置代理，但需判断代理是否可用
+		proxyAddr := config.SysConfig.GetHttpProxy()
+		if proxyAddr != "" {
+			proxyURL, err := url.Parse(proxyAddr)
+			if err == nil {
+				client = &http.Client{
+					Transport: &http.Transport{
+						Proxy: http.ProxyURL(proxyURL),
+					},
+				}
+			} else {
+				zap.S().Warnf("代理地址无效，未设置代理: %s, 错误: %v", proxyAddr, err)
+				client = &http.Client{}
 			}
 		}
 		resp, err := client.Do(req)
