@@ -16,7 +16,9 @@ package util
 
 import (
 	"bytes"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"time"
@@ -30,6 +32,8 @@ import (
 	"github.com/labstack/echo/v4"
 	"go.uber.org/zap"
 )
+
+var ProxyIsAvailable = true
 
 func RetryRequest(f func() (*common.Response, error)) (*common.Response, error) {
 	var resp *common.Response
@@ -46,24 +50,86 @@ func RetryRequest(f func() (*common.Response, error)) (*common.Response, error) 
 	return resp, err
 }
 
+// buildURL 构建请求URL，根据代理可用性选择主URL或备用URL
+func buildURL(requestURL string) (string, error) {
+	parsedURL, err := url.Parse(requestURL)
+	if err != nil {
+		return "", fmt.Errorf("解析请求URL失败: %w", err)
+	}
+	if ProxyIsAvailable || !config.SysConfig.DynamicProxy.Enabled {
+		return config.SysConfig.GetHFURLBase() + parsedURL.Path, nil
+	}
+	return config.SysConfig.GetBpHFURLBase() + parsedURL.Path, nil
+}
+
+// NewHTTPClientWithProxy 根据代理地址、超时时间和代理可用性创建HTTP客户端
+func NewHTTPClientWithProxy(proxyAddr string, timeout time.Duration, proxyIsAvailable bool) (*http.Client, error) {
+	client := &http.Client{Timeout: timeout}
+	if !proxyIsAvailable || proxyAddr == "" {
+		if proxyAddr == "" {
+			zap.S().Warnf("未配置代理，使用默认HTTP客户端")
+		}
+		return client, nil
+	}
+
+	proxyURL, err := url.Parse(proxyAddr)
+	if err != nil {
+		return nil, fmt.Errorf("代理地址解析失败: %v", err)
+	}
+
+	transport := &http.Transport{
+		Proxy: http.ProxyURL(proxyURL),
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ForceAttemptHTTP2:     false,
+		ResponseHeaderTimeout: 10 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	}
+
+	client.Transport = transport
+	zap.S().Warnf("已启用HTTP代理: %s", proxyAddr)
+	return client, nil
+}
+
 // Head 方法用于发送带请求头的 HEAD 请求
-func Head(url string, headers map[string]string, timeout time.Duration) (*common.Response, error) {
-	req, err := http.NewRequest("HEAD", url, nil)
+func Head(requestURL string, headers map[string]string, timeout time.Duration) (*common.Response, error) {
+	targetURL, err := buildURL(requestURL)
 	if err != nil {
 		return nil, err
+	}
+
+	req, err := http.NewRequest("HEAD", targetURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("创建HEAD请求失败: %v", err)
 	}
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
-	client := &http.Client{}
-	client.Timeout = timeout
+
+	client, clientErr := NewHTTPClientWithProxy(config.SysConfig.GetHttpProxy(), timeout, ProxyIsAvailable)
+	if clientErr != nil {
+		return nil, clientErr
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		zap.S().Warnf("URL请求失败: %s, 错误: %v", targetURL, err)
+		return nil, fmt.Errorf("执行HEAD请求失败: %v", err)
 	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			zap.S().Errorf("关闭响应体资源时出现异常: %v", r)
+		}
+		resp.Body.Close()
+	}()
+
 	respHeaders := make(map[string]interface{})
-	for key, value := range resp.Header {
-		respHeaders[key] = value
+	for key, values := range resp.Header {
+		respHeaders[key] = values
 	}
 	return &common.Response{
 		StatusCode: resp.StatusCode,
@@ -72,29 +138,48 @@ func Head(url string, headers map[string]string, timeout time.Duration) (*common
 }
 
 // Get 方法用于发送带请求头的 GET 请求
-func Get(url string, headers map[string]string, timeout time.Duration) (*common.Response, error) {
-	req, err := http.NewRequest("GET", url, nil)
+func Get(requestURL string, headers map[string]string, timeout time.Duration) (*common.Response, error) {
+	targetURL, err := buildURL(requestURL)
 	if err != nil {
 		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", targetURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("创建GET请求失败: %v", err)
 	}
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
-	client := &http.Client{}
-	client.Timeout = timeout
+
+	client, clientErr := NewHTTPClientWithProxy(config.SysConfig.GetHttpProxy(), timeout, ProxyIsAvailable)
+	if clientErr != nil {
+		return nil, clientErr
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		zap.S().Warnf("URL请求失败: %s, 错误: %v", targetURL, err)
+		return nil, fmt.Errorf("执行GET请求失败: %v", err)
 	}
-	defer resp.Body.Close()
+
+	defer func() {
+		if r := recover(); r != nil {
+			zap.S().Errorf("关闭响应体资源时出现异常: %v", r)
+		}
+		resp.Body.Close()
+	}()
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("读取响应体失败: %v", err)
 	}
+
 	respHeaders := make(map[string]interface{})
-	for key, value := range resp.Header {
-		respHeaders[key] = value
+	for key, values := range resp.Header {
+		respHeaders[key] = values
 	}
+
 	return &common.Response{
 		StatusCode: resp.StatusCode,
 		Headers:    respHeaders,
@@ -102,53 +187,82 @@ func Get(url string, headers map[string]string, timeout time.Duration) (*common.
 	}, nil
 }
 
-func GetStream(url string, headers map[string]string, timeout time.Duration, f func(r *http.Response)) error {
-	client := &http.Client{}
-	client.Timeout = timeout
-	req, err := http.NewRequest("GET", url, nil)
+// GetStream 方法用于发送带请求头的 GET 请求并流式处理响应
+func GetStream(requestURL string, headers map[string]string, timeout time.Duration, f func(r *http.Response)) error {
+	targetURL, err := buildURL(requestURL)
 	if err != nil {
 		return err
+	}
+
+	req, err := http.NewRequest("GET", targetURL, nil)
+	if err != nil {
+		return fmt.Errorf("创建GET请求失败: %v", err)
 	}
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
+
+	client, clientErr := NewHTTPClientWithProxy(config.SysConfig.GetHttpProxy(), timeout, ProxyIsAvailable)
+	if clientErr != nil {
+		return clientErr
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		zap.S().Warnf("URL请求失败: %s, 错误: %v", targetURL, err)
+		return fmt.Errorf("执行GET请求失败: %v", err)
 	}
-	defer resp.Body.Close()
-	respHeaders := make(map[string]interface{})
-	for key, value := range resp.Header {
-		respHeaders[key] = value
-	}
+
 	f(resp)
+
 	return nil
 }
 
 // Post 方法用于发送带请求头的 POST 请求
-func Post(url string, contentType string, data []byte, headers map[string]string) (*common.Response, error) {
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(data))
+func Post(requestURL string, contentType string, data []byte, headers map[string]string) (*common.Response, error) {
+	targetURL, err := buildURL(requestURL)
 	if err != nil {
 		return nil, err
 	}
+
+	req, err := http.NewRequest("POST", targetURL, bytes.NewBuffer(data))
+	if err != nil {
+		return nil, fmt.Errorf("创建POST请求失败: %v", err)
+	}
+
 	req.Header.Set("Content-Type", contentType)
 	for key, value := range headers {
 		req.Header.Set(key, value)
 	}
-	client := &http.Client{}
+
+	client, clientErr := NewHTTPClientWithProxy(config.SysConfig.GetHttpProxy(), 0, ProxyIsAvailable)
+	if clientErr != nil {
+		return nil, clientErr
+	}
+
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		zap.S().Warnf("URL请求失败: %s, 错误: %v", targetURL, err)
+		return nil, fmt.Errorf("执行POST请求失败: %v", err)
 	}
-	defer resp.Body.Close()
+
+	defer func() {
+		if r := recover(); r != nil {
+			zap.S().Errorf("关闭响应体资源时出现异常: %v", r)
+		}
+		resp.Body.Close()
+	}()
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("读取响应体失败: %v", err)
 	}
+
 	respHeaders := make(map[string]interface{})
-	for key, value := range resp.Header {
-		respHeaders[key] = value
+	for key, values := range resp.Header {
+		respHeaders[key] = values
 	}
+
 	return &common.Response{
 		StatusCode: resp.StatusCode,
 		Headers:    respHeaders,

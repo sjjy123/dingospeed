@@ -2,6 +2,9 @@ package service
 
 import (
 	"fmt"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -29,6 +32,11 @@ func NewSysService() *SysService {
 
 			if config.SysConfig.DiskClean.Enabled {
 				go sysSvc.cycleCheckDiskUsage()
+			}
+
+			testProxyConnectivity()
+			if config.SysConfig.DynamicProxy.Enabled {
+				go sysSvc.cycleTestProxyConnectivity()
 			}
 		})
 	return sysSvc
@@ -136,4 +144,66 @@ func checkDiskUsage() {
 	}
 	currentSizeH = util.ConvertBytesToHumanReadable(currentSize)
 	zap.S().Infof("Cleaning finished. Limit: %s, Current: %s.\n", limitSizeH, currentSizeH)
+}
+
+func (s SysService) cycleTestProxyConnectivity() {
+	ticker := time.NewTicker(config.SysConfig.GetDynamicProxyTimePeriod())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			testProxyConnectivity()
+		}
+	}
+}
+
+// 测试代理连通性
+func testProxyConnectivity() {
+	proxyURL, err := url.Parse(config.SysConfig.GetHttpProxy())
+	if err != nil {
+		util.ProxyIsAvailable = false
+		zap.S().Warnf("代理测试请求创建失败: %v", err)
+		return
+	}
+
+	// 创建一个短期超时的HTTP客户端用于测试
+	testClient := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			Proxy: http.ProxyURL(proxyURL),
+			DialContext: (&net.Dialer{
+				Timeout: 3 * time.Second,
+			}).DialContext,
+		},
+	}
+
+	// 尝试访问一个轻量级的公共URL
+	req, err := http.NewRequest("GET", "https://www.google.com", nil)
+	if err != nil {
+		util.ProxyIsAvailable = false
+		zap.S().Warnf("代理测试请求创建失败: %v", err)
+		return
+	}
+
+	// 设置合理的请求头，避免被反爬机制拦截
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; proxy-test/1.0)")
+
+	// 执行请求
+	resp, err := testClient.Do(req)
+	if err != nil {
+		util.ProxyIsAvailable = false
+		zap.S().Warnf("代理测试失败: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// 检查HTTP状态码
+	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		zap.S().Infof("代理测试成功: %s", proxyURL.String())
+		return
+	}
+
+	util.ProxyIsAvailable = false
+	zap.S().Warnf("代理测试返回非成功状态码: %d", resp.StatusCode)
+	return
 }
