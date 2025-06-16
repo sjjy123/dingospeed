@@ -45,81 +45,83 @@ func NewRemoteFileTask(taskNo int, rangeStartPos int64, rangeEndPos int64) *Remo
 	return r
 }
 
-// 分段下载
+// 预分配池以减少GC压力
+var bufferPool = &sync.Pool{
+	New: func() interface{} {
+		return &bytes.Buffer{}
+	},
+}
+
 func (r RemoteFileTask) DoTask() {
 	var (
 		curBlock int64
 		wg       sync.WaitGroup
 	)
+
 	contentChan := make(chan []byte, consts.RespChanSize)
 	rangeStartPos, rangeEndPos := r.RangeStartPos, r.RangeEndPos
-	zap.S().Infof("remote file download:%s/%s, taskNo:%d, size:%d, startPos:%d, endPos:%d", r.orgRepo, r.FileName, r.TaskNo, r.TaskSize, rangeStartPos, rangeEndPos)
+	zap.S().Infof("remote file download:%s/%s, taskNo:%d, size:%d, startPos:%d, endPos:%d",
+		r.orgRepo, r.FileName, r.TaskNo, r.TaskSize, rangeStartPos, rangeEndPos)
+
 	wg.Add(2)
 	go r.getFileRangeFromRemote(&wg, rangeStartPos, rangeEndPos, contentChan)
+
 	curPos := rangeStartPos
-	streamCache := bytes.Buffer{}
-	lastBlock, lastBlockStartPos, lastBlockEndPos := getBlockInfo(curPos, r.DingFile.getBlockSize(), r.DingFile.GetFileSize()) // 块编号，开始位置，结束位置
-	blockNumber := r.DingFile.getBlockNumber()
+	streamCache := bufferPool.Get().(*bytes.Buffer)
+	streamCache.Reset()
+	defer bufferPool.Put(streamCache)
+
+	lastBlock, lastBlockStartPos, lastBlockEndPos := getBlockInfo(curPos, r.DingFile.getBlockSize(), r.DingFile.GetFileSize())
+
 	go func() {
 		defer func() {
 			close(r.Queue)
 			wg.Done()
 		}()
+
 		for {
 			select {
 			case chunk, ok := <-contentChan:
-				{
-					if !ok {
-						return
-					}
-					// 先写到缓存
-					select {
-					case r.Queue <- chunk:
-					case <-r.Context.Done():
-						return
+				if !ok {
+					return
+				}
+
+				// 处理并转发数据块
+				select {
+				case r.Queue <- chunk:
+				case <-r.Context.Done():
+					return
+				}
+
+				curPos += int64(len(chunk))
+				streamCache.Write(chunk)
+
+				if config.SysConfig.EnableMetric() {
+					source := util.Itoa(r.Context.Value(consts.PromSource))
+					prom.PromRequestByteCounter(prom.RequestRemoteByte, source, int64(len(chunk)))
+				}
+
+				curBlock = curPos / r.DingFile.getBlockSize()
+				if curBlock != lastBlock {
+					splitPos := lastBlockEndPos - max(lastBlockStartPos, rangeStartPos)
+					cacheLen := int64(streamCache.Len())
+
+					if splitPos > cacheLen {
+						zap.S().Errorf("splitPos err.%d-%d", splitPos, cacheLen)
+						splitPos = cacheLen
 					}
 
-					chunkLen := int64(len(chunk))
-					curPos += chunkLen
-
-					if config.SysConfig.EnableMetric() {
-						// 原子性地更新总下载字节数
-						source := util.Itoa(r.Context.Value(consts.PromSource))
-						prom.PromRequestByteCounter(prom.RequestRemoteByte, source, chunkLen)
-					}
-
-					if len(chunk) != 0 {
-						streamCache.Write(chunk)
-					}
-					curBlock = curPos / r.DingFile.getBlockSize()
-					// 若是一个新的数据块，则将上一个数据块持久化。
-					if curBlock != lastBlock {
-						splitPos := lastBlockEndPos - max(lastBlockStartPos, rangeStartPos)
-						cacheLen := int64(streamCache.Len())
-						if splitPos > cacheLen {
-							// 正常不会出现splitPos>len(streamCacheBytes),若出现只能降级处理。
-							zap.S().Errorf("splitPos err.%d-%d", splitPos, cacheLen)
-							splitPos = cacheLen
+					rawBlock := streamCache.Bytes()[:splitPos]
+					if len(rawBlock) == int(r.DingFile.getBlockSize()) {
+						if err := r.processBlock(lastBlock, rawBlock); err != nil {
+							zap.S().Errorf("processBlock err: %v", err)
 						}
-						streamCacheBytes := streamCache.Bytes()
-						rawBlock := streamCacheBytes[:splitPos] // 当前块的数据
-						if int64(len(rawBlock)) == r.DingFile.getBlockSize() {
-							hasBlockBool, err := r.DingFile.HasBlock(lastBlock)
-							if err != nil {
-								zap.S().Errorf("HasBlock err.%v", err)
-							}
-							if err == nil && !hasBlockBool {
-								if err = r.DingFile.WriteBlock(lastBlock, rawBlock); err != nil {
-									zap.S().Errorf("writeBlock err.%v", err)
-								}
-								zap.S().Debugf("%s/%s, taskNo:%d, block：%d(%d)write done, range：%d-%d.", r.orgRepo, r.FileName, r.TaskNo, lastBlock, blockNumber, lastBlockStartPos, lastBlockEndPos)
-							}
-						}
-						nextBlock := streamCacheBytes[splitPos:] // 下一个块的数据
-						streamCache.Truncate(0)
-						streamCache.Write(nextBlock)
-						lastBlock, lastBlockStartPos, lastBlockEndPos = getBlockInfo(curPos, r.DingFile.getBlockSize(), r.DingFile.GetFileSize())
 					}
+
+					nextBlock := streamCache.Bytes()[splitPos:]
+					streamCache.Truncate(0)
+					streamCache.Write(nextBlock)
+					lastBlock, lastBlockStartPos, lastBlockEndPos = getBlockInfo(curPos, r.DingFile.getBlockSize(), r.DingFile.GetFileSize())
 				}
 			case <-r.Context.Done():
 				zap.S().Warnf("file:%s/%s, task %d, ctx done, DoTask exit.", r.orgRepo, r.FileName, r.TaskNo)
@@ -127,35 +129,53 @@ func (r RemoteFileTask) DoTask() {
 			}
 		}
 	}()
+
 	wg.Wait()
+
+	// 处理剩余数据
 	rawBlock := streamCache.Bytes()
-	if curBlock == r.DingFile.getBlockNumber()-1 {
+	if curBlock == r.DingFile.getBlockNumber()-1 && len(rawBlock) > 0 {
 		// 对不足一个block的数据做补全
-		if int64(len(rawBlock)) == r.DingFile.GetFileSize()%r.DingFile.getBlockSize() {
-			padding := bytes.Repeat([]byte{0}, int(r.DingFile.getBlockSize())-len(rawBlock))
+		if len(rawBlock) == int(r.DingFile.GetFileSize()%r.DingFile.getBlockSize()) {
+			padding := make([]byte, r.DingFile.getBlockSize()-int64(len(rawBlock)))
 			rawBlock = append(rawBlock, padding...)
 		}
-		lastBlock = curBlock
-	}
-	if int64(len(rawBlock)) == r.DingFile.getBlockSize() {
-		hasBlockBool, err := r.DingFile.HasBlock(lastBlock)
-		if err != nil {
-			zap.S().Errorf("HasBlock err.%v", err)
-			return
-		}
-		if !hasBlockBool {
-			if err = r.DingFile.WriteBlock(lastBlock, rawBlock); err != nil {
-				zap.S().Errorf("last writeBlock err.%v", err)
+
+		if len(rawBlock) == int(r.DingFile.getBlockSize()) {
+			if err := r.processBlock(curBlock, rawBlock); err != nil {
+				zap.S().Errorf("process last block err: %v", err)
 			}
-			zap.S().Debugf("file:%s/%s, taskNo:%d, last block：%d(%d)write done, range：%d-%d.", r.orgRepo, r.FileName, r.TaskNo, lastBlock, blockNumber, lastBlockStartPos, lastBlockEndPos)
-			if err = util.CreateSymlinkIfNotExists(r.blobsFile, r.filesPath); err != nil {
-				zap.S().Errorf("filesPath:%s is not link", r.filesPath)
+
+			if err := util.CreateSymlinkIfNotExists(r.blobsFile, r.filesPath); err != nil {
+				zap.S().Errorf("create symlink err: %v", err)
 			}
 		}
 	}
+
 	if curPos != rangeEndPos {
-		zap.S().Warnf("file:%s, taskNo:%d, remote range (%d) is different from sent size (%d).", r.FileName, r.TaskNo, rangeEndPos-rangeStartPos, curPos-rangeStartPos)
+		zap.S().Warnf("file:%s, taskNo:%d, remote range (%d) is different from sent size (%d).",
+			r.FileName, r.TaskNo, rangeEndPos-rangeStartPos, curPos-rangeStartPos)
 	}
+}
+
+// 辅助方法：处理数据块
+func (r RemoteFileTask) processBlock(blockNum int64, data []byte) error {
+	hasBlock, err := r.DingFile.HasBlock(blockNum)
+	if err != nil {
+		return fmt.Errorf("HasBlock err: %w", err)
+	}
+
+	if !hasBlock {
+		if err := r.DingFile.WriteBlock(blockNum, data); err != nil {
+			return fmt.Errorf("WriteBlock err: %w", err)
+		}
+
+		zap.S().Debugf("%s/%s, taskNo:%d, block：%d(%d)write done, range：%d-%d.",
+			r.orgRepo, r.FileName, r.TaskNo, blockNum, r.DingFile.getBlockNumber(),
+			blockNum*r.DingFile.getBlockSize(), (blockNum+1)*r.DingFile.getBlockSize()-1)
+	}
+
+	return nil
 }
 
 func (r RemoteFileTask) OutResult() {
