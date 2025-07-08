@@ -163,7 +163,7 @@ func (s SysService) cycleTestProxyConnectivity() {
 // 测试代理连通性
 var successMsg = "，当前代理已恢复连通性"
 var failMsg = "，当前代理无法连接，请检查网络或代理设置"
-var webhook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=73662ac1-1055-48a7-8c89-37964b5f4fdc"
+var webhook = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=73662ac1-1055-48a7-8c89-37964b5f4fdc1111"
 
 const (
 	proxyTestTimeout  = 5 * time.Second
