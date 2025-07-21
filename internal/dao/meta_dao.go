@@ -17,6 +17,7 @@ package dao
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	"dingospeed/pkg/common"
 	"dingospeed/pkg/config"
@@ -110,6 +111,13 @@ func (m *MetaDao) RepoRefs(repoType string, orgRepo string, authorization string
 	}
 	resp, err := util.RetryRequest(func() (*common.Response, error) {
 		return util.Get(refsUrl, headers, config.SysConfig.GetReqTimeOut())
+	})
+	return resp, err
+}
+
+func (m *MetaDao) ForwardRefs(targetURL string, originalReq *http.Request, timeout time.Duration) (*common.Response, error) {
+	resp, err := util.RetryRequest(func() (*common.Response, error) {
+		return util.ForwardRequest(targetURL, originalReq, timeout)
 	})
 	return resp, err
 }
