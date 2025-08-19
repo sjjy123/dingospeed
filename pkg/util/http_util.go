@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"dingospeed/pkg/common"
@@ -35,6 +36,9 @@ import (
 )
 
 var ProxyIsAvailable = true
+
+// 全局缓存http.Transport（按代理地址区分，避免重复创建连接池）
+var transportMap = sync.Map{} // key: proxyAddr, value: *http.Transport
 
 func RetryRequest(f func() (*common.Response, error)) (*common.Response, error) {
 	var resp *common.Response
@@ -56,26 +60,54 @@ func NewHTTPClient(timeout time.Duration) (*http.Client, error) {
 	return client, nil
 }
 
+// NewHTTPClientWithProxy 创建HTTP客户端，复用按代理地址缓存的Transport
 func NewHTTPClientWithProxy(timeout time.Duration) (*http.Client, error) {
-	client := &http.Client{Timeout: timeout}
-	proxyURL, err := url.Parse(config.SysConfig.GetHttpProxy())
-	if err != nil {
-		return nil, fmt.Errorf("代理地址解析失败: %v", err)
-	}
-	transport := &http.Transport{
-		Proxy: http.ProxyURL(proxyURL),
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ForceAttemptHTTP2:     false,
-		ResponseHeaderTimeout: 10 * time.Second,
-		IdleConnTimeout:       90 * time.Second,
+	// 1. 获取代理地址（从配置中读取）
+	proxyAddr := config.SysConfig.GetHttpProxy()
+
+	// 2. 从缓存获取或创建对应的Transport
+	var transport *http.Transport
+	if proxyAddr == "" {
+		// 无代理时使用默认Transport
+		transport = http.DefaultTransport.(*http.Transport).Clone() // 克隆默认配置，避免修改全局默认值
+	} else {
+		// 有代理时，从缓存加载或创建Transport
+		val, ok := transportMap.Load(proxyAddr)
+		if !ok {
+			// 解析代理地址
+			proxyURL, err := url.Parse(proxyAddr)
+			if err != nil {
+				return nil, fmt.Errorf("代理地址解析失败: %v", err)
+			}
+			// 创建带连接池优化的Transport
+			newTransport := &http.Transport{
+				Proxy: http.ProxyURL(proxyURL),
+				DialContext: (&net.Dialer{
+					Timeout:   30 * time.Second, // 拨号超时
+					KeepAlive: 30 * time.Second, // 长连接保活时间
+				}).DialContext,
+				TLSHandshakeTimeout:   10 * time.Second, // TLS握手超时
+				ForceAttemptHTTP2:     false,            // 禁用HTTP/2（根据需求调整）
+				ResponseHeaderTimeout: 10 * time.Second, // 响应头超时
+				IdleConnTimeout:       90 * time.Second, // 空闲连接超时
+				MaxIdleConns:          100,              // 最大空闲连接数（全局）
+				MaxIdleConnsPerHost:   10,               // 每个主机的最大空闲连接数
+				MaxConnsPerHost:       100,              // 每个主机的最大连接数（限制并发）
+			}
+			// 存入缓存（LoadOrStore确保并发安全）
+			val, _ = transportMap.LoadOrStore(proxyAddr, newTransport)
+		}
+		// 从缓存中取出Transport
+		transport = val.(*http.Transport)
 	}
 
-	client.Transport = transport
-	zap.S().Warnf("已启用HTTP代理: %s", config.SysConfig.GetHttpProxy())
+	// 3. 创建新的HTTP客户端（轻量对象，每次创建新实例避免状态污染）
+	client := &http.Client{
+		Timeout:   timeout,   // 客户端整体超时（覆盖连接、读取等阶段）
+		Transport: transport, // 复用缓存的Transport（连接池核心）
+	}
+
+	zap.S().Debugf("已初始化HTTP客户端（代理: %s, 超时: %v）", proxyAddr, timeout)
 	return client, nil
 }
 
@@ -310,7 +342,7 @@ func ForwardRequest(originalReq *http.Request, timeout time.Duration) (*common.R
 	if err != nil {
 		return nil, fmt.Errorf("construct http client err: %v", err)
 	}
-	targetURL := fmt.Sprintf("%s%s", domain, originalReq.URL.Path)
+	targetURL := fmt.Sprintf("%s%s", domain, originalReq.URL.RequestURI())
 	proxyReq, err := http.NewRequest(originalReq.Method, targetURL, originalReq.Body)
 	if err != nil {
 		return nil, fmt.Errorf("创建转发请求失败: %v", err)
