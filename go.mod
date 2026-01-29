@@ -10,6 +10,7 @@ require (
 	github.com/bytedance/sonic v1.13.2
 	github.com/go-playground/validator/v10 v10.27.0
 	github.com/go-redsync/redsync/v4 v4.13.0
+	github.com/gofrs/flock v0.8.1
 	github.com/google/uuid v1.6.0
 	github.com/google/wire v0.6.0
 	github.com/klauspost/compress v1.18.0

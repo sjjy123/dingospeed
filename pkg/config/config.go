@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -46,6 +47,7 @@ type Config struct {
 	DynamicProxy     DynamicProxy     `json:"dynamicProxy" yaml:"dynamicProxy"`
 	Scheduler        Scheduler        `json:"scheduler" yaml:"scheduler"`
 	mu               sync.RWMutex
+	Modelscope       Modelscope `yaml:"modelscope"`
 }
 
 type ServerConfig struct {
@@ -152,6 +154,13 @@ type DynamicProxy struct {
 	TimePeriod         int    `json:"timePeriod" yaml:"timePeriod"`
 	MaxContinuousFails int    `json:"maxContinuousFails" yaml:"maxContinuousFails"`
 	Webhook            string `json:"webhook " yaml:"webhook"`
+}
+
+type Modelscope struct {
+	OfficialBaseURL string `yaml:"officialBaseURL"`
+	ChunkSize       int64  `yaml:"chunkSize"`
+	MaxRetry        int    `yaml:"maxRetry"`
+	RetryDelay      int    `yaml:"retryDelay"`
 }
 
 func (c *Config) GetHFURLBase() string {
@@ -321,6 +330,14 @@ func (c *Config) GetSchedulerModel() string {
 
 func (c *Config) GetOriginSchedulerModel() string {
 	return c.Scheduler.OriginMode
+}
+
+func (c *Config) GetModelCacheRoot() string {
+	return filepath.Join(c.Server.Repos, consts.ModelCacheRoot)
+}
+
+func (c *Config) GetDatasetCacheRoot() string {
+	return filepath.Join(c.Server.Repos, consts.DatasetCacheRoot)
 }
 
 func (c *Config) SetDefaults() {

@@ -104,3 +104,8 @@ const (
 const (
 	TaskMoreErrMsg = "当前缓存任务较多导致启动失败，请稍后再启动。"
 )
+
+const (
+	ModelCacheRoot   = "modelscope/models"
+	DatasetCacheRoot = "modelscope/datasets"
+)
